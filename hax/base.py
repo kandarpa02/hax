@@ -11,7 +11,7 @@ class Module:
 
     def add_parameters(self, name, shape, init_function, dtype='float32'):
         param = init_function(shape=shape, dtype=dtype, rng=self.rng)
-        self._params[name] = jnp.asarray(param, dtype=dtype)
+        self._params[name] = jax.numpy.asarray(param, dtype=dtype)
         return self._params[name]
 
     def _collect_params(self):
