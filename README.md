@@ -1,4 +1,5 @@
-# Hax - Minimalist Neural Network Abstraction for JAX
+# Hax
+*Minimalist Neural Network Abstraction for JAX*
 
 **Hax** is an extremely low-level Module abstraction for building neural networks with JAX. Designed for researchers and enthusiasts who want full control without the overhead of complex frameworks like Haiku or Flax. Build layers from scratch with a learning curve that's practically zero!
 
