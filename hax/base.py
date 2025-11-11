@@ -1,16 +1,39 @@
 from collections import Counter
 from jax import tree_util
+import jax
+from jax.random import split
 
+def _set_rng(module, rng):
+    module.rng, _ = split(rng, 2)
+    for name, attr in module.__dict__.items():
+        if isinstance(attr, Module):
+            rng, _ = jax.random.split(rng, 2)
+            _set_rng(attr, rng)
 
 @tree_util.register_pytree_node_class
 class Module:
-    def __init__(self, rng) -> None:
+    def __init__(self) -> None:
         self._params = {}
         self._allow_call = False
-        self.rng = rng
+        self.rng = None
+        self.dtype = None
 
-    def add_parameters(self, name, shape, init_function, dtype='float32'):
-        param = init_function(shape=shape, dtype=dtype, rng=self.rng)
+    def _set_rng(self):
+        _set_rng(self, self.rng)
+
+    def _set_dtype(self, dtype):
+        self.dtype = dtype
+        for name, attr in self.__dict__.items():
+            if isinstance(attr, Module):
+                attr.dtype = dtype
+
+    def add_parameters(self, name, shape, init_function):
+        dtype = self.dtype
+        try:
+            param = init_function(shape=shape, dtype=dtype, rng=self.rng)
+        except:
+            param = init_function(shape=shape, dtype=dtype)
+
         self._params[name] = jax.numpy.asarray(param, dtype=dtype)
         return self._params[name]
 
@@ -28,7 +51,7 @@ class Module:
         self._params = {k: v for k, v in params.items() if not isinstance(v, dict)}
 
     def tree_flatten(self):
-        children = {k: v for k, v in self.__dict__.items() if isinstance(v, Module) or isinstance(v, jnp.ndarray)}
+        children = {k: v for k, v in self.__dict__.items() if isinstance(v, Module) or isinstance(v, jax.numpy.ndarray)}
         static = {k: v for k, v in self.__dict__.items() if k not in children}
         return (tuple(children.values()), (type(self), tuple(children.keys()), static))
 

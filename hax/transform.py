@@ -3,7 +3,14 @@ import jax.numpy as jnp
 import numpy as np
 from .base import Module
 
-# assumes your Module class (with _collect_params, _assign_params, etc.) already exists
+
+def _set_allow_call(module, value: bool):
+    """Recursively enable/disable __call__ for a module and all its submodules."""
+    module._allow_call = value
+    for name, attr in module.__dict__.items():
+        if isinstance(attr, Module):
+            _set_allow_call(attr, value)
+
 
 class Transformed:
     """Container for init and apply functions."""
@@ -20,23 +27,34 @@ def transform(fn):
     Works like haiku.transform.
     """
     def init_fn(rng, *args, **kwargs):
-        # Create a fresh module and record its parameters
-        model = fn(*args, **kwargs)
-        if not isinstance(model, Module):
-            raise TypeError("The function must return a Module instance.")
-        model._allow_call = True
-        _ = model(jnp.zeros_like(args[0]))  # or example input to trigger param creation
-        model._allow_call = False
-        params = model._collect_params()
-        return params, model  # return both, if needed
+        if not isinstance(fn, Module):
+            raise TypeError("The function must be a Module instance.")
+        _set_allow_call(fn, True)
+        fn.rng = rng
+        fn._set_rng()
+        dtype = None
 
-    def apply_fn(params, *args, **kwargs):
+        for k, v in kwargs.items():
+            if k in ['dtype']:
+                dtype = v
+            else:
+                dtype = args[0].dtype
+
+        fn._set_dtype(dtype=dtype)
+        
+        _ = fn(*args)  # or example input to trigger param creation
+        _set_allow_call(fn, False)
+        params = fn._collect_params()
+        return params 
+
+    def apply_fn(rng, params, *args):
         # Create a new module and assign params
-        model = fn(*args, **kwargs)
-        model._assign_params(params)
-        model._allow_call = True
-        out = model(*args, **kwargs)
-        model._allow_call = False
+        fn._assign_params(params)
+        _set_allow_call(fn, True)
+        fn.rng = rng
+        fn._set_rng()
+        out = fn(*args)
+        _set_allow_call(fn, False)
         return out
 
     return Transformed(init_fn, apply_fn)
