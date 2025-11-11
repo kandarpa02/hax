@@ -80,5 +80,6 @@ jax.jit(f.apply)(key, params, x)
 #        [4.2896457],
 #        [4.2896457]], dtype=float32)
 ```
+---
 
-## If you liked my work you can star this repo :)
+If you liked my work do star this repo :)
