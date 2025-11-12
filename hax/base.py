@@ -20,7 +20,6 @@ from jax import tree_util
 import jax
 from jax.random import split
 
-
 def _set_allow_call(module, value: bool):
     """Recursively enable or disable the `__call__` method for a module tree.
 
@@ -105,16 +104,15 @@ class Module:
         jax.numpy.ndarray
             The initialized parameter array.
         """
-        dtype = self.dtype
-        try:
-            param = init_function(shape=shape, dtype=dtype, rng=self.rng)
-        except Exception:
-            param = init_function(shape=shape, dtype=dtype)
+        if name not in self._params.keys():
+            dtype = self.dtype
+            try:
+                param = init_function(shape=shape, dtype=dtype, rng=self.rng)
+            except Exception:
+                param = init_function(shape=shape, dtype=dtype)
 
-        self._params[name] = jax.numpy.asarray(param, dtype=dtype)
-        return self._params[name]
-    
-    def get_params(self, name):
+            self._params[name] = jax.numpy.asarray(param, dtype=dtype)
+        
         return self._params[name]
 
     def _collect_params(self):
@@ -246,6 +244,7 @@ class Module:
             _ = self(*args)  # trigger parameter creation
             _set_allow_call(self, False)
             params = self._collect_params()
+            self._params = {}
             return params
 
         return init_self(rng, *args, **kwargs)
@@ -277,3 +276,27 @@ class Module:
             return out
 
         return apply_self(rng, params, *args)
+    
+    def apply_nonrng(self, params, *args):
+        """Apply the module without rng with a given set of parameters.
+
+        Parameters
+        ----------
+        params : dict
+            The parameter dictionary obtained from `init()`.
+        *args
+            Inputs to the forward computation.
+
+        Returns
+        -------
+        Any
+            The module output for the given parameters and inputs.
+        """
+        def apply_self(params, *args):
+            self._assign_params(params)
+            _set_allow_call(self, True)
+            out = self(*args)
+            _set_allow_call(self, False)
+            return out
+        
+        return apply_self(params, *args)
