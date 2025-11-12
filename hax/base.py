@@ -87,7 +87,7 @@ class Module:
             if isinstance(attr, Module):
                 attr.dtype = dtype
 
-    def add_parameters(self, name, shape, init_function):
+    def add_params(self, name, shape, init_function):
         """Register a learnable parameter for the module.
 
         Parameters
@@ -112,6 +112,9 @@ class Module:
             param = init_function(shape=shape, dtype=dtype)
 
         self._params[name] = jax.numpy.asarray(param, dtype=dtype)
+        return self._params[name]
+    
+    def get_params(self, name):
         return self._params[name]
 
     def _collect_params(self):
@@ -153,7 +156,7 @@ class Module:
             k: v for k, v in self.__dict__.items()
             if isinstance(v, Module) or isinstance(v, jax.numpy.ndarray)
         }
-        static = {k: v for k in self.__dict__ if k not in children}
+        static = {k: v for k, v in self.__dict__.items() if k not in children}
         return (tuple(children.values()), (type(self), tuple(children.keys()), static))
 
     @classmethod

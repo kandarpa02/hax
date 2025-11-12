@@ -93,3 +93,4 @@ jax.jit(f.apply)(key, params, x)
 ---
 
 If you liked my work do star this repo :)
+  
