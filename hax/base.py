@@ -18,7 +18,9 @@
 from collections import Counter
 from jax import tree_util
 import jax
+import jax.numpy as jnp
 from jax.random import split
+import inspect
 
 def _set_allow_call(module, value: bool):
     """Recursively enable or disable the `__call__` method for a module tree.
@@ -104,15 +106,26 @@ class Module:
         jax.numpy.ndarray
             The initialized parameter array.
         """
-        if name not in self._params.keys():
-            dtype = self.dtype
-            try:
-                param = init_function(shape=shape, dtype=dtype, rng=self.rng)
-            except Exception:
-                param = init_function(shape=shape, dtype=dtype)
+        if name not in self._params:
+            dtype = getattr(self, "dtype", jnp.float32)
+            rng = getattr(self, "rng", None)
 
-            self._params[name] = jax.numpy.asarray(param, dtype=dtype)
-        
+            # Introspect which arguments init_function supports
+            sig = inspect.signature(init_function)
+            supported = set(sig.parameters)
+
+            kwargs = {}
+            if "shape" in supported:
+                kwargs["shape"] = shape
+            if "dtype" in supported:
+                kwargs["dtype"] = dtype
+            if "rng" in supported or "key" in supported:  # common alias
+                kwargs["rng"] = rng
+
+            # Initialize param
+            param = init_function(**kwargs)
+            self._params[name] = jnp.asarray(param, dtype=dtype)
+
         return self._params[name]
 
     def _collect_params(self):
