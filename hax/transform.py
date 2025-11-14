@@ -31,47 +31,65 @@ def _set_allow_call(module, value: bool):
 
 class Transformed:
     """Container for init and apply functions."""
-    def __init__(self, init_fn, apply_fn):
+    def __init__(self, init_fn, apply_fn, apply_nonrng):
         self.init = init_fn
         self.apply = apply_fn
+        self.apply_nonrng = apply_nonrng
     
     def __repr__(self) -> str:
-        return f"TransformedFunction(\ninit:{self.init},\napply:{self.apply}\n)"
+        return f"TransformedFunction(\ninit:{self.init},\napply:{self.apply},\napply_nonrng:{self.apply})"
 
-def transform(fn):
+from .basemodule import _get_frame
+
+def transform(fun):
+    """Return (init_fn, apply_fn) for a pure function `fun` that creates modules inline.
+
+    - init_fn(rng, *args, **kwargs) -> params
+    - apply_fn(params, *args, **kwargs) -> outputs
     """
-    Turns an impure model-building function into pure (init, apply) pair.
-    Works like haiku.transform.
-    """
+
     def init_fn(rng, *args, **kwargs):
-        if not isinstance(fn, Module):
-            raise TypeError("The function must be a Module instance.")
-        _set_allow_call(fn, True)
-        fn.rng = rng
-        fn._set_rng()
-        dtype = None
+        frame = _get_frame()
+        # prepare fresh frame for init
+        frame.params = {}
+        frame.rng = rng
+        frame.in_init = True
+        frame.reset_counters()
 
-        for k, v in kwargs.items():
-            if k in ['dtype']:
-                dtype = v
-            else:
-                dtype = args[0].dtype
+        try:
+            _ = fun(*args, **kwargs)
+        finally:
+            # always disable init flag to avoid accidental reuse
+            frame.in_init = False
+            frame.rng = None
+            frame.reset_counters()
 
-        fn._set_dtype(dtype=dtype)
-        
-        _ = fn(*args)  # or example input to trigger param creation
-        _set_allow_call(fn, False)
-        params = fn._collect_params()
-        return params 
+        # return the params dict (shallow copy to avoid accidental mutation)
+        return frame.params
 
-    def apply_fn(rng, params, *args):
-        # Create a new module and assign params
-        fn._assign_params(params)
-        _set_allow_call(fn, True)
-        fn.rng = rng
-        fn._set_rng()
-        out = fn(*args)
-        _set_allow_call(fn, False)
+    def apply_fn(params, rng, *args, **kwargs):
+        frame = _get_frame()
+        frame.params = params
+        frame.in_init = False
+        frame.rng = rng 
+        frame.reset_counters()
+
+        out = fun(*args, **kwargs)
+
+        frame.params = {}
         return out
 
-    return Transformed(init_fn, apply_fn)
+    def apply_nonrng(params, *args, **kwargs):
+        frame = _get_frame()
+        frame.params = params
+        frame.in_init = False
+        frame.rng = None
+        frame.reset_counters()
+
+        out = fun(*args, **kwargs)
+
+        # clear frame.params reference to avoid accidental retention
+        frame.params = {}
+        return out
+
+    return Transformed(init_fn, apply_fn, apply_nonrng)

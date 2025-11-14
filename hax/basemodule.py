@@ -16,12 +16,50 @@
 """Module Class"""
 
 from .base import ModuleTree
-from collections import Counter
+from collections import Counter, defaultdict
+import threading
 from jax import tree_util
 import jax
 import jax.numpy as jnp
 from jax.random import split
 import inspect
+
+
+class Frame:
+    """Runtime frame used during init/apply.
+
+
+    - params: nested dict of module_name -> {param_name: array}
+    - rng: PRNGKey used during init to generate params
+    - in_init: bool flag
+    - _counters: per-class counters to produce deterministic names in call order
+    """
+    def __init__(self):
+        self.params = {}
+        self.rng = None
+        self.in_init = False
+        self._counters = defaultdict(int)
+
+    def reset_counters(self):
+        self._counters.clear()
+    
+    def next_name(self, class_name: str) -> str:
+        """Generate a deterministic name for the module call."""
+        idx = self._counters[class_name]
+        self._counters[class_name] += 1
+        return f"{class_name.lower()}" if idx == 0 else f"{class_name.lower()}{idx}"
+
+
+_thread_local = threading.local()
+
+
+def _get_frame() -> Frame:
+    f = getattr(_thread_local, "frame", None)
+    if f is None:
+        f = Frame()
+        _thread_local.frame = f
+    return f
+
 
 def _set_allow_call(module, value: bool):
     """Recursively enable or disable the `__call__` method for a module tree.
@@ -37,7 +75,6 @@ def _set_allow_call(module, value: bool):
     for name, attr in module.__dict__.items():
         if isinstance(attr, Module):
             _set_allow_call(attr, value)
-
 
 def _set_rng(module, rng):
     """Recursively assign RNG keys to a module and its submodules.
@@ -55,226 +92,91 @@ def _set_rng(module, rng):
             rng, _ = jax.random.split(rng, 2)
             _set_rng(attr, rng)
 
-
-# @tree_util.register_pytree_node_class
 class Module(ModuleTree):
-    """Base class for all neural network modules in Hax.
+    """Base class for ephemeral modules in Haiku-style Hax.
 
-    The `Module` abstraction provides a low-level interface for defining
-    parameterized layers in JAX. It supports parameter management, RNG
-    propagation, and JAX tree utilities for functional transformations.
+    Modules are *templates* only. They do not persist parameters. On each
+    call during init/apply they generate deterministic names via the Frame and
+    read/write params from the Frame.params dict.
     """
 
-    def __init__(self) -> None:
-        super().__init__()
-        """Initialize an empty module."""
-        self._params = {}
-        self._allow_call = False
-        self.rng = None
-        self.dtype = None
+    def __init__(self):
+        # store any python-only configuration in the instance (e.g., units)
+        pass
 
-    def _set_rng(self):
-        """Assign RNG keys to this module and all submodules."""
-        _set_rng(self, self.rng)
+    def _module_name(self) -> str:
+        """Return the deterministic module name for the current call.
 
-    def _set_dtype(self, dtype):
-        """Propagate the dtype setting to this module and all submodules.
-
-        Parameters
-        ----------
-        dtype : jax.numpy.dtype
-            The data type to apply to parameters and submodules.
+        This uses the Frame.next_name() which increments counters in order of
+        creation. The same creation order in init and apply yields identical
+        names.
         """
-        self.dtype = dtype
-        for name, attr in self.__dict__.items():
-            if isinstance(attr, Module):
-                attr.dtype = dtype
+        frame = _get_frame()
+        return frame.next_name(self.__class__.__name__)
 
-    def add_params(self, name, shape, init_function):
-        """Register a learnable parameter for the module.
 
-        Parameters
-        ----------
-        name : str
-            The name of the parameter.
-        shape : tuple[int]
-            The shape of the parameter.
-        init_function : Callable
-            A function to initialize the parameter. Must accept
-            `(shape, dtype, rng)` or `(shape, dtype)`.
+    def add_params(self, name: str, shape, init_fn):
+        """Register or fetch a parameter for this module call.
 
-        Returns
-        -------
-        jax.numpy.ndarray
-            The initialized parameter array.
+        Behavior depends on whether we're inside init or apply:
+        - init: call `init_fn` to create the parameter, store it into
+          `frame.params[module_name][name]`.
+        - apply: read value from `frame.params` and return it.
+
+        `init_fn` may accept kwargs like (shape=..., rng=...) or (shape,)
+        and we introspect the signature.
         """
-        if name not in self._params:
-            dtype = getattr(self, "dtype", jnp.float32)
-            rng = getattr(self, "rng", None)
+        frame = _get_frame()
+        module_name = self._module_name()
 
-            # Introspect which arguments init_function supports
-            sig = inspect.signature(init_function)
-            supported = set(sig.parameters)
+        # ensure module bucket exists in params
+        if module_name not in frame.params:
+            frame.params[module_name] = {}
 
-            kwargs = {}
-            if "shape" in supported:
-                kwargs["shape"] = shape
-            if "dtype" in supported:
-                kwargs["dtype"] = dtype
-            if "rng" in supported or "key" in supported:  # common alias
-                kwargs["rng"] = rng
+        bucket = frame.params[module_name]
 
-            # Initialize param
-            param = init_function(**kwargs)
-            self._params[name] = jnp.asarray(param, dtype=dtype)
+        if frame.in_init:
+            # create param if not present
+            if name not in bucket:
+                # split rng for param creation
+                if frame.rng is None:
+                    raise RuntimeError("No RNG available in frame during init")
+                key, frame.rng = split(frame.rng, 2)
 
-        return self._params[name]
+                # call init_fn with supported kwargs
+                sig = inspect.signature(init_fn)
+                kwargs = {}
+                if "shape" in sig.parameters:
+                    kwargs["shape"] = tuple(shape)
+                if "rng" in sig.parameters or "key" in sig.parameters:
+                    # prefer rng kwarg name if present
+                    if "rng" in sig.parameters:
+                        kwargs["rng"] = key
+                    else:
+                        kwargs["key"] = key
 
-    def _collect_params(self):
-        """Recursively gather parameters from all submodules.
+                # support functions that expect positional-only (shape, rng)
+                try:
+                    param = init_fn(**kwargs)
+                except TypeError:
+                    # fallback to positional
+                    pos_args = []
+                    if "shape" in sig.parameters:
+                        pos_args.append(tuple(shape))
+                    if ("rng" in sig.parameters) or ("key" in sig.parameters):
+                        pos_args.append(key)
+                    param = init_fn(*pos_args)
 
-        Returns
-        -------
-        dict
-            A nested dictionary containing all module parameters.
-        """
-        params = dict(self._params)
-        for name, attr in self.__dict__.items():
-            if isinstance(attr, Module):
-                params[name] = attr._collect_params()
-        return params
+                bucket[name] = jnp.asarray(param)
 
-    def _assign_params(self, params):
-        """Recursively assign parameters to this module and its submodules.
-
-        Parameters
-        ----------
-        params : dict
-            A nested dictionary of parameters, typically from `_collect_params()`.
-        """
-        for name, attr in self.__dict__.items():
-            if isinstance(attr, Module):
-                attr._assign_params(params[name])
-        self._params = {k: v for k, v in params.items() if not isinstance(v, dict)}
-
+        # apply or post-init: return the parameter
+        if name not in bucket:
+            raise KeyError(f"Parameter {name} not found in module {module_name}")
+        return bucket[name]
 
     def __call__(self, *args, **kwargs):
-        """Invoke the module's forward computation.
-
-        Raises
-        ------
-        RuntimeError
-            If direct calls are not allowed (must use `apply()` instead).
-        """
-        if not getattr(self, "_allow_call", False):
-            raise RuntimeError(
-                "Direct model call is not allowed. "
-                "Use `apply(model, params, x)` instead."
-            )
         return self.forward(*args, **kwargs)
 
     def forward(self, *args, **kwargs):
-        """Define the forward computation for the module.
-
-        Subclasses must override this method to specify computation.
-
-        Raises
-        ------
-        NotImplementedError
-            Always raised in the base class.
-        """
         raise NotImplementedError
 
-    def init(self, rng, *args, **kwargs):
-        """Initialize module parameters using an example input.
-
-        This method triggers parameter creation by temporarily allowing
-        a forward call. All created parameters are collected into a
-        nested dictionary.
-
-        Parameters
-        ----------
-        rng : jax.random.PRNGKey
-            RNG key used for parameter initialization.
-        *args, **kwargs
-            Example inputs passed to `forward()`.
-
-        Returns
-        -------
-        dict
-            A nested dictionary of initialized parameters.
-        """
-        def init_self(rng, *args, **kwargs):
-            if not isinstance(self, Module):
-                raise TypeError("The function must be a Module instance.")
-            _set_allow_call(self, True)
-            self.rng = rng
-            self._set_rng()
-
-            dtype = None
-            for k, v in kwargs.items():
-                if k in ['dtype']:
-                    dtype = v
-                else:
-                    dtype = args[0].dtype
-
-            self._set_dtype(dtype=dtype)
-            _ = self(*args)  # trigger parameter creation
-            _set_allow_call(self, False)
-            params = self._collect_params()
-            self._params = {}
-            return params
-
-        return init_self(rng, *args, **kwargs)
-
-    def apply(self, rng, params, *args):
-        """Apply the module with a given set of parameters.
-
-        Parameters
-        ----------
-        rng : jax.random.PRNGKey
-            RNG key for stochastic operations.
-        params : dict
-            The parameter dictionary obtained from `init()`.
-        *args
-            Inputs to the forward computation.
-
-        Returns
-        -------
-        Any
-            The module output for the given parameters and inputs.
-        """
-        def apply_self(rng, params, *args):
-            self._assign_params(params)
-            _set_allow_call(self, True)
-            self.rng = rng
-            self._set_rng()
-            out = self(*args)
-            _set_allow_call(self, False)
-            return out
-
-        return apply_self(rng, params, *args)
-    
-    def apply_nonrng(self, params, *args):
-        """Apply the module without rng with a given set of parameters.
-
-        Parameters
-        ----------
-        params : dict
-            The parameter dictionary obtained from `init()`.
-        *args
-            Inputs to the forward computation.
-
-        Returns
-        -------
-        Any
-            The module output for the given parameters and inputs.
-        """
-        def apply_self(params, *args):
-            self._assign_params(params)
-            _set_allow_call(self, True)
-            out = self(*args)
-            _set_allow_call(self, False)
-            return out
-        
-        return apply_self(params, *args)
