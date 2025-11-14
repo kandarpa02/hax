@@ -1,4 +1,4 @@
-from .base import Module
+from .basemodule import Module
 from typing import Protocol, runtime_checkable, Union, Callable, Type
 
 @runtime_checkable

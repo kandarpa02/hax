@@ -15,5 +15,6 @@
 
 
 from .transform import transform
-from .base import Module
+from .basemodule import Module
 from .modulelist import ModuleStack
+from .rngsetup import RNG

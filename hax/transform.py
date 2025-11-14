@@ -18,7 +18,7 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
-from .base import Module
+from .basemodule import Module
 
 
 def _set_allow_call(module, value: bool):
