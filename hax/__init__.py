@@ -16,3 +16,4 @@
 
 from .transform import transform
 from .base import Module
+from .modulelist import ModuleStack
