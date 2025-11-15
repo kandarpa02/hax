@@ -52,4 +52,4 @@ def param(module:Module, name:str, shape:tuple|list, init_fn:Callable):
     • All parameters from this module call share the same
         `_current_call_name()`.
     """
-    return module.add_params(name, shape, init_fn)
+    return module.add_param(name, shape, init_fn)
