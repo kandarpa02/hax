@@ -37,21 +37,20 @@ class Frame:
     def __init__(self):
         self.params = {}
         self.rng = None
+        self.dtype = None
         self.in_init = False
         self._counters = defaultdict(int)
 
     def reset_counters(self):
         self._counters.clear()
-    
+
     def next_name(self, class_name: str) -> str:
         """Generate a deterministic name for the module call."""
         idx = self._counters[class_name]
         self._counters[class_name] += 1
         return f"{class_name.lower()}" if idx == 0 else f"{class_name.lower()}{idx}"
 
-
 _thread_local = threading.local()
-
 
 def _get_frame() -> Frame:
     f = getattr(_thread_local, "frame", None)
@@ -59,7 +58,6 @@ def _get_frame() -> Frame:
         f = Frame()
         _thread_local.frame = f
     return f
-
 
 def _set_allow_call(module, value: bool):
     """Recursively enable or disable the `__call__` method for a module tree.
@@ -102,7 +100,7 @@ class Module(ModuleTree):
 
     def __init__(self):
         # store any python-only configuration in the instance (e.g., units)
-        pass
+        self.dtype = None
 
     def _module_name(self) -> str:
         """Return the deterministic module name for the current call.
@@ -142,6 +140,7 @@ class Module(ModuleTree):
                 if frame.rng is None:
                     raise RuntimeError("No RNG available in frame during init")
                 key, frame.rng = split(frame.rng, 2)
+                dtype = frame.dtype
 
                 # call init_fn with supported kwargs
                 sig = inspect.signature(init_fn)
@@ -154,6 +153,9 @@ class Module(ModuleTree):
                         kwargs["rng"] = key
                     else:
                         kwargs["key"] = key
+                        
+                if "dtype" in sig.parameters:
+                    kwargs["dtype"] = dtype
 
                 # support functions that expect positional-only (shape, rng)
                 try:
@@ -163,6 +165,8 @@ class Module(ModuleTree):
                     pos_args = []
                     if "shape" in sig.parameters:
                         pos_args.append(tuple(shape))
+                    if "dtype" in sig.parameters:
+                        pos_args.append(dtype)
                     if ("rng" in sig.parameters) or ("key" in sig.parameters):
                         pos_args.append(key)
                     param = init_fn(*pos_args)
@@ -175,8 +179,5 @@ class Module(ModuleTree):
         return bucket[name]
 
     def __call__(self, *args, **kwargs):
-        return self.forward(*args, **kwargs)
-
-    def forward(self, *args, **kwargs):
         raise NotImplementedError
 

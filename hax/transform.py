@@ -48,11 +48,19 @@ def transform(fun):
     - apply_fn(params, *args, **kwargs) -> outputs
     """
 
-    def init_fn(rng, *args, **kwargs):
+    def init_fn(rng, *args, dtype=None, **kwargs):
         frame = _get_frame()
         # prepare fresh frame for init
         frame.params = {}
         frame.rng = rng
+        if dtype == None:
+            for arg in args:
+                if isinstance(arg, np.ndarray|jax.Array):
+                    frame.dtype = arg.dtype
+    
+        else:
+            frame.dtype = dtype
+            
         frame.in_init = True
         frame.reset_counters()
 

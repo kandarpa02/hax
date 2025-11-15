@@ -40,7 +40,6 @@ class ModuleStack(Module):
         module.
     """
 
-
     def __init__(self, layer:LayerSpec, nums:int, **kwargs) -> None:
         super().__init__()
             

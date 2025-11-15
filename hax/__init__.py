@@ -17,4 +17,18 @@
 from .transform import transform
 from .basemodule import Module
 from .modulelist import ModuleStack
+from .sequential import Sequential
 from .rngsetup import RNG
+from .parameter import Param
+
+class initializers:
+    from .Initializer import (
+        Constant,
+        RandomNormal,
+        RandomUniform,
+        TruncatedNormal,
+        VarianceScaling,
+        UniformScaling,
+        Orthogonal,
+        Identity
+    )
