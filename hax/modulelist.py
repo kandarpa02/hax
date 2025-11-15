@@ -1,3 +1,19 @@
+# Copyright 2025 Kandarpa Sarkar.
+#
+# Licensed under the MIT License.
+# You may obtain a copy of the License at:
+#
+#     https://opensource.org/licenses/MIT
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Hax: A lightweight Module abstraction for JAX.
+
+
 from .basemodule import Module
 from typing import Protocol, runtime_checkable, Union, Callable, Type
 
@@ -45,7 +61,8 @@ class ModuleStack(Module):
             
         self.nums = nums
         self.layers = self._make_stack(layer, **kwargs)
-    
+        # self._make_stack(layer, **kwargs)
+
     def _make_stack(self, layer, **kwargs):
         layers = []
         for i in range(self.nums):
@@ -58,8 +75,8 @@ class ModuleStack(Module):
             else:
                 raise TypeError("Layer must be a Module, class, or factory.")
 
-            name = f"{obj.__class__.__name__.lower()}{i}"
-            setattr(self, name, obj)
+            # name = f"{obj.__class__.__name__.lower()}{i}"
+            # setattr(self, name, obj)
             layers.append(obj)
 
         return layers

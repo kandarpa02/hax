@@ -1,75 +1,55 @@
-from .basemodule import _get_frame, split, inspect, jnp
+# Copyright 2025 Kandarpa Sarkar.
+#
+# Licensed under the MIT License.
+# You may obtain a copy of the License at:
+#
+#     https://opensource.org/licenses/MIT
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Hax: A lightweight Module abstraction for JAX.
 
-def Param(module, name, shape, init_fn):
+
+from .basemodule import _get_frame, split, inspect, jnp
+from .basemodule import Module
+from typing import Callable
+
+def param(module:Module, name:str, shape:tuple|list, init_fn:Callable):
     """
-    Standalone Haiku-like get_parameter function.
-    
+    Register or retrieve a parameter belonging to this module call.
+
     Parameters
     ----------
-    module : Module
-        The module instance calling this parameter.
+    module: Module
+        Module instance which is the current subclass you're working on
+        (e.g. "self").
     name : str
-        Name of the parameter.
-    shape : tuple or list
-        Shape of the parameter.
-    init_fn : callable
-        Initialization function that takes `shape` and optionally `rng` or `key`.
+        The local name of the parameter within this module call
+        (e.g. "w", "b").
+    shape : Sequence[int]
+        Shape of the parameter to be created.
+    init_fn : Callable
+        A parameter initializer. Signature may include:
+            (shape), (shape, rng), (shape, dtype), (shape, dtype, rng)  
+        The method automatically inspects the initializer’s signature and
+        supplies supported keyword arguments.
 
     Returns
     -------
-    jnp.ndarray
-        The parameter array from the frame.
+    jax.Array
+        The parameter tensor, either created (during init) or retrieved
+        (during apply).
+
+    Notes
+    -----
+    • During `init()`, a fresh RNG is split and passed to the initializer.  
+    • During `apply()`, parameters must already exist; otherwise a
+        KeyError is raised.  
+    • All parameters from this module call share the same
+        `_current_call_name()`.
     """
-    frame = _get_frame()
-    module_name = module._module_name()  # call module's name function
-
-    # ensure module bucket exists
-    if module_name not in frame.params:
-        frame.params[module_name] = {}
-
-    bucket = frame.params[module_name]
-
-    if frame.in_init:
-        # create param if not present
-        if name not in bucket:
-            # split rng for param creation
-            if frame.rng is None:
-                raise RuntimeError("No RNG available in frame during init")
-            key, frame.rng = split(frame.rng, 2)
-            dtype = frame.dtype
-
-            # call init_fn with supported kwargs
-            sig = inspect.signature(init_fn)
-            kwargs = {}
-            if "shape" in sig.parameters:
-                kwargs["shape"] = tuple(shape)
-            if "rng" in sig.parameters or "key" in sig.parameters:
-                # prefer rng kwarg name if present
-                if "rng" in sig.parameters:
-                    kwargs["rng"] = key
-                else:
-                    kwargs["key"] = key
-                    
-            if "dtype" in sig.parameters:
-                kwargs["dtype"] = dtype
-
-            # support functions that expect positional-only (shape, rng)
-            try:
-                param = init_fn(**kwargs)
-            except TypeError:
-                # fallback to positional
-                pos_args = []
-                if "shape" in sig.parameters:
-                    pos_args.append(tuple(shape))
-                if "dtype" in sig.parameters:
-                    pos_args.append(dtype)
-                if ("rng" in sig.parameters) or ("key" in sig.parameters):
-                    pos_args.append(key)
-                param = init_fn(*pos_args)
-
-            bucket[name] = jnp.asarray(param)
-
-    if name not in bucket:
-        raise KeyError(f"Parameter {name} not found in module {module_name}")
-    
-    return bucket[name]
+    return module.add_params(name, shape, init_fn)

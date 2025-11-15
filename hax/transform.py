@@ -19,7 +19,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from .basemodule import Module
-
+from .rngsetup import RNG
 
 def _set_allow_call(module, value: bool):
     """Recursively enable/disable __call__ for a module and all its submodules."""
@@ -48,11 +48,20 @@ def transform(fun):
     - apply_fn(params, *args, **kwargs) -> outputs
     """
 
-    def init_fn(rng, *args, dtype=None, **kwargs):
+    def init_fn(rng:RNG, *args, dtype=None, **kwargs):
         frame = _get_frame()
         # prepare fresh frame for init
         frame.params = {}
-        frame.rng = rng
+
+        def rng_type(rng):
+            if isinstance(rng, RNG):
+                return rng
+            else:
+                raise ValueError(f'pass a RNG instance, found {type(rng)}')
+        
+        _rng = rng_type(rng)
+
+        frame.rng = _rng
         if dtype == None:
             for arg in args:
                 if isinstance(arg, np.ndarray|jax.Array):

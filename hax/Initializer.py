@@ -1,11 +1,34 @@
+# Copyright 2025 Kandarpa Sarkar.
+#
+# Licensed under the MIT License.
+# You may obtain a copy of the License at:
+#
+#     https://opensource.org/licenses/MIT
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Hax: A lightweight Module abstraction for JAX.
+
+"Initializer"
+
 from collections.abc import Sequence
 from typing import Callable, Any, Protocol
 import jax
 import jax.numpy as jnp
 import numpy as np
-
+from .rngsetup import RNG
 class Initializer(Protocol):
     def __call__(self, *args: Any, **kwds: Any) -> Any: ...
+
+def rng_type(rng):
+  if isinstance(rng, RNG):
+    return rng()
+  else:
+    raise ValueError(f'pass a RNG instance, found {type(rng)}')
 
 def _compute_fans(shape, fan_in_axes=None):
   """Computes the number of input and output units for a weight shape."""
@@ -60,10 +83,11 @@ class RandomNormal(Initializer):
     self.stddev = stddev
     self.mean = mean
 
-  def __call__(self, key:jax.Array, shape: Sequence[int], dtype) -> jax.Array:
+  def __call__(self, key:RNG, shape: Sequence[int], dtype) -> jax.Array:
+    _key = rng_type(key)
     m = jax.lax.convert_element_type(self.mean, dtype)
     s = jax.lax.convert_element_type(self.stddev, dtype)
-    return m + s * jax.random.normal(key, shape, dtype)
+    return m + s * jax.random.normal(_key, shape, dtype)
 
 
 class TruncatedNormal(Initializer):
@@ -89,7 +113,8 @@ class TruncatedNormal(Initializer):
     self.lower = lower
     self.upper = upper
 
-  def __call__(self, key:jax.Array, shape: Sequence[int], dtype: Any) -> jax.Array:
+  def __call__(self, key:RNG, shape: Sequence[int], dtype: Any) -> jax.Array:
+    _key = rng_type(key)
     real_dtype = jnp.finfo(dtype).dtype
     m = jax.lax.convert_element_type(self.mean, dtype)
     s = jax.lax.convert_element_type(self.stddev, real_dtype)
@@ -97,7 +122,7 @@ class TruncatedNormal(Initializer):
     if is_complex:
       shape = [2, *shape]
     unscaled = jax.random.truncated_normal(
-        key, self.lower, self.upper, shape, real_dtype)
+        _key, self.lower, self.upper, shape, real_dtype)
     if is_complex:
       unscaled = unscaled[0] + 1j * unscaled[1]
     return s * unscaled + m
@@ -116,8 +141,9 @@ class RandomUniform(Initializer):
         self.minval = minval
         self.maxval = maxval
 
-    def __call__(self, key:jax.Array, shape: Sequence[int], dtype: Any) -> jax.Array:
-        return jax.random.uniform(key, shape, dtype, self.minval,
+    def __call__(self, key:RNG, shape: Sequence[int], dtype: Any) -> jax.Array:
+        _key = rng_type(key)
+        return jax.random.uniform(_key, shape, dtype, self.minval,
                                 self.maxval)
 
 
@@ -181,7 +207,7 @@ class VarianceScaling(Initializer):
     self.distribution = distribution
     self.fan_in_axes = fan_in_axes
 
-  def __call__(self, key:jax.Array, shape: Sequence[int], dtype: Any) -> jax.Array:
+  def __call__(self, key:RNG, shape: Sequence[int], dtype: Any) -> jax.Array:
     scale = self.scale
     fan_in, fan_out = _compute_fans(shape, self.fan_in_axes)
     if self.mode == 'fan_in':
@@ -204,7 +230,7 @@ class VarianceScaling(Initializer):
     else:
       limit = np.sqrt(3.0 * scale)
       return RandomUniform(minval=-limit, maxval=limit)(key, shape, dtype)
-
+    
 
 class UniformScaling(Initializer):
   """Uniform scaling initializer.
@@ -222,7 +248,7 @@ class UniformScaling(Initializer):
     """
     self.scale = scale
 
-  def __call__(self, key:jax.Array, shape: Sequence[int], dtype: Any) -> jax.Array:
+  def __call__(self, key:RNG, shape: Sequence[int], dtype: Any) -> jax.Array:
     input_size = np.prod(shape[:-1])
     max_val = np.sqrt(3 / input_size) * self.scale
     return RandomUniform(-max_val, max_val)(key, shape, dtype)
@@ -254,13 +280,14 @@ class Orthogonal(Initializer):
     self.scale = scale
     self.axis = axis
 
-  def __call__(self, key:jax.Array, shape: Sequence[int], dtype: Any) -> jax.Array:
+  def __call__(self, key:RNG, shape: Sequence[int], dtype: Any) -> jax.Array:
+    _key = rng_type(key)
     if len(shape) < 2:
       raise ValueError('Orthogonal initializer requires at least a 2D shape.')
     n_rows = shape[self.axis]
     n_cols = np.prod(shape) // n_rows
     matrix_shape = (n_rows, n_cols) if n_rows > n_cols else (n_cols, n_rows)
-    norm_dst = jax.random.normal(key, matrix_shape, dtype)
+    norm_dst = jax.random.normal(_key, matrix_shape, dtype)
     q_mat, r_mat = jnp.linalg.qr(norm_dst)
     # Enforce Q is uniformly distributed
     q_mat *= jnp.sign(jnp.diag(r_mat))

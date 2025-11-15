@@ -19,7 +19,7 @@ from .basemodule import Module
 from .modulelist import ModuleStack
 from .sequential import Sequential
 from .rngsetup import RNG
-from .parameter import Param
+from .parameter import param
 
 class initializers:
     from .Initializer import (

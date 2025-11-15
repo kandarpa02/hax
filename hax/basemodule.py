@@ -23,7 +23,7 @@ import jax
 import jax.numpy as jnp
 from jax.random import split
 import inspect
-
+from .rngsetup import RNG
 
 class Frame:
     """Runtime frame used during init/apply.
@@ -36,7 +36,7 @@ class Frame:
     """
     def __init__(self):
         self.params = {}
-        self.rng = None
+        self.rng:RNG = None
         self.dtype = None
         self.in_init = False
         self._counters = defaultdict(int)
@@ -90,94 +90,223 @@ def _set_rng(module, rng):
             rng, _ = jax.random.split(rng, 2)
             _set_rng(attr, rng)
 
-class Module(ModuleTree):
-    """Base class for ephemeral modules in Haiku-style Hax.
 
-    Modules are *templates* only. They do not persist parameters. On each
-    call during init/apply they generate deterministic names via the Frame and
-    read/write params from the Frame.params dict.
+class Module(ModuleTree):
+    """
+    Base class for all neural network modules in Hax.
+
+    Hax uses an ephemeral, Haiku-style module system: module instances act as
+    *stateless templates* that define how parameters are created and used inside
+    a transformed function. Parameters are never stored inside `Module`
+    instances; instead they are stored in a thread-local :class:`Frame`,
+    populated during `init()` and read during `apply()`.
+
+    ---------------------------------------------------------------------------
+    Core Concepts
+    ---------------------------------------------------------------------------
+    • **Stateless Modules**
+        A `Module` carries only Python configuration (like `units`) but no
+        parameters, RNG keys, or state. This ensures that the same module
+        instance can be reused freely without side effects.
+
+    • **Deterministic Naming**
+        Each module invocation receives a stable, deterministic name derived
+        from a per-class counter inside the :class:`Frame`. This ensures that
+        parameters created during `init()` are retrieved in the same order
+        during `apply()`, even across JIT/pmap/vmap transformations.
+
+    • **Frame-Based Parameter Storage**
+        Parameters live inside a nested dictionary:
+        
+        ``{ module_name -> { param_name -> jax.Array } }``
+
+        The module name is assigned per *call*, not per instance.
+
+    • **Init vs Apply**
+        During `init()`:
+            - Parameters are created using `init_fn`
+            - RNGs are consumed by splitting
+        During `apply()`:
+            - Parameters are simply retrieved from the Frame
+
+    Subclasses must implement :meth:`call`, which defines the forward pass.
+
+    ---------------------------------------------------------------------------
+    Example
+    ---------------------------------------------------------------------------
+    >>> class Linear(hax.Module):
+    ...     def __init__(self, units):
+    ...         super().__init__()
+    ...         self.units = units
+    ...
+    ...     def call(self, x):
+    ...         w = self.add_params("w", [x.shape[-1], self.units], glorot_uniform)
+    ...         b = self.add_params("b", [self.units], zeros)
+    ...         return x @ w + b
+
+    >>> @hax.transform
+    ... def net(x):
+    ...     x = Linear(32)(x)
+    ...     return Linear(10)(x)
+
+    >>> params = net.init(hax.RNG(0), x)
+    >>> y = net.apply(params, x)
     """
 
     def __init__(self):
-        # store any python-only configuration in the instance (e.g., units)
+        """
+        Initialize a new module instance.
+
+        Modules do not store parameters internally. Any attributes set here
+        should be Python-only configuration (e.g., number of units, kernel size,
+        activation flags). The dtype for parameter initializers may also be set
+        here if needed.
+        """
         self.dtype = None
 
-    def _module_name(self) -> str:
-        """Return the deterministic module name for the current call.
+    def _begin_call(self):
+        """
+        Reset per-call state before a new `__call__` execution.
 
-        This uses the Frame.next_name() which increments counters in order of
-        creation. The same creation order in init and apply yields identical
-        names.
+        This ensures that a module invoked multiple times (e.g. inside a loop,
+        sequential stack, or repeated in a functional transform) receives a new
+        deterministic name for each invocation.
+
+        Clears the `_call_name` cache so :meth:`_current_call_name` will allocate
+        a new name on the first param registration of this call.
+        """
+        if hasattr(self, "_call_name"):
+            del self._call_name
+
+    def _current_call_name(self):
+        """
+        Return the deterministic name assigned to the current module call.
+
+        The name is created lazily on first access via `Frame.next_name(...)`
+        and cached for the rest of the call. Subsequent `add_params` calls
+        reuse this name so all parameters for this invocation are grouped into
+        the same bucket.
+
+        Returns
+        -------
+        str
+            The module name for this invocation (e.g. "linear", "linear1").
         """
         frame = _get_frame()
-        return frame.next_name(self.__class__.__name__)
+        if not hasattr(self, "_call_name"):
+            self._call_name = frame.next_name(self.__class__.__name__)
+        return self._call_name
 
+    def add_param(self, name: str, shape, init_fn):
+        """
+        Register or retrieve a parameter belonging to this module call.
 
-    def add_params(self, name: str, shape, init_fn):
-        """Register or fetch a parameter for this module call.
+        Parameters
+        ----------
+        name : str
+            The local name of the parameter within this module call
+            (e.g. "w", "b").
+        shape : Sequence[int]
+            Shape of the parameter to be created.
+        init_fn : Callable
+            A parameter initializer. Signature may include:
+                (shape), (shape, rng), (shape, dtype), (shape, dtype, rng)  
+            The method automatically inspects the initializer’s signature and
+            supplies supported keyword arguments.
 
-        Behavior depends on whether we're inside init or apply:
-        - init: call `init_fn` to create the parameter, store it into
-          `frame.params[module_name][name]`.
-        - apply: read value from `frame.params` and return it.
+        Returns
+        -------
+        jax.Array
+            The parameter tensor, either created (during init) or retrieved
+            (during apply).
 
-        `init_fn` may accept kwargs like (shape=..., rng=...) or (shape,)
-        and we introspect the signature.
+        Notes
+        -----
+        • During `init()`, a fresh RNG is split and passed to the initializer.  
+        • During `apply()`, parameters must already exist; otherwise a
+          KeyError is raised.  
+        • All parameters from this module call share the same
+          `_current_call_name()`.
         """
         frame = _get_frame()
-        module_name = self._module_name()
 
-        # ensure module bucket exists in params
+        module_name = self._current_call_name()
+
+        # ensure bucket exists
         if module_name not in frame.params:
             frame.params[module_name] = {}
 
         bucket = frame.params[module_name]
 
+        # creation path
         if frame.in_init:
-            # create param if not present
             if name not in bucket:
-                # split rng for param creation
                 if frame.rng is None:
                     raise RuntimeError("No RNG available in frame during init")
-                key, frame.rng = split(frame.rng, 2)
+
+                key, frame.rng = frame.rng.split(2)
                 dtype = frame.dtype
 
-                # call init_fn with supported kwargs
                 sig = inspect.signature(init_fn)
                 kwargs = {}
                 if "shape" in sig.parameters:
                     kwargs["shape"] = tuple(shape)
                 if "rng" in sig.parameters or "key" in sig.parameters:
-                    # prefer rng kwarg name if present
-                    if "rng" in sig.parameters:
-                        kwargs["rng"] = key
-                    else:
-                        kwargs["key"] = key
-                        
+                    kwargs["rng" if "rng" in sig.parameters else "key"] = key
                 if "dtype" in sig.parameters:
                     kwargs["dtype"] = dtype
 
-                # support functions that expect positional-only (shape, rng)
+                # Call initializer, falling back to positional args if needed.
                 try:
                     param = init_fn(**kwargs)
                 except TypeError:
-                    # fallback to positional
-                    pos_args = []
+                    args = []
                     if "shape" in sig.parameters:
-                        pos_args.append(tuple(shape))
+                        args.append(tuple(shape))
                     if "dtype" in sig.parameters:
-                        pos_args.append(dtype)
-                    if ("rng" in sig.parameters) or ("key" in sig.parameters):
-                        pos_args.append(key)
-                    param = init_fn(*pos_args)
+                        args.append(dtype)
+                    if "rng" in sig.parameters or "key" in sig.parameters:
+                        args.append(key)
+                    param = init_fn(*args)
 
                 bucket[name] = jnp.asarray(param)
 
-        # apply or post-init: return the parameter
+        # retrieval path
         if name not in bucket:
-            raise KeyError(f"Parameter {name} not found in module {module_name}")
+            raise KeyError(f"Parameter {name!r} not found in module {module_name!r}")
         return bucket[name]
 
     def __call__(self, *args, **kwargs):
-        raise NotImplementedError
+        """
+        Invoke the module on inputs.
 
+        This method resets call-specific naming state via :meth:`_begin_call`,
+        then delegates to :meth:`call`, which subclasses must implement.
+
+        Returns
+        -------
+        Any
+            Output of the module's forward computation.
+        """
+        self._begin_call()
+        return self.call(*args, **kwargs)
+
+    def call(self, *args, **kwargs):
+        """
+        Forward pass of the module.
+
+        Subclasses must override this method to implement their computation.
+        `call()` is invoked by `__call__()` after preparing call-local state.
+
+        Example
+        -------
+        >>> class AddOne(hax.Module):
+        ...     def call(self, x):
+        ...         return x + 1
+
+        Raises
+        ------
+        NotImplementedError
+            Always raised if not overridden.
+        """
+        raise NotImplementedError
