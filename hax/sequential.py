@@ -14,8 +14,18 @@
 # Hax: A lightweight Module abstraction for JAX.
 
 
-from typing import Sequence, Callable, Union
+from typing import Sequence, Callable, Union, Optional, Protocol, Iterable, Any
 from .basemodule import Module
+from .modulelist import ModuleStack
+
+class _layerspec(Protocol):
+    def __call__(self): ...
+
+    def __iter__(self) -> Any: ...
+
+    def __next__(self) -> Any: ...
+
+ModuleList = Union[ModuleStack, _layerspec]
 
 class Sequential(Module):
     """
@@ -48,7 +58,7 @@ class Sequential(Module):
     - Useful for creating MLPs or simple layer stacks with minimal boilerplate.
     """
 
-    def __init__(self, layers: Sequence[Union[Module, Callable]]):
+    def __init__(self, layers:ModuleList):
         super().__init__()
         self.layers = layers
 
